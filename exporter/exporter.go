@@ -109,7 +109,8 @@ func (e *NebulaExporter) CollectMetrics(
 	namespace string,
 	cluster string,
 	originMetrics []string,
-	ch chan<- prometheus.Metric) {
+	ch chan<- prometheus.Metric,
+	aggregator *metricAggregator) {
 	if len(originMetrics) == 0 {
 		return
 	}
@@ -132,6 +133,11 @@ func (e *NebulaExporter) CollectMetrics(
 			if e.IgnorePattern.MatchString(metricName) {
 				continue
 			}
+		}
+
+		// Track for aggregation if aggregator is provided
+		if aggregator != nil {
+			aggregator.addRaw(metricName, v, componentType, cluster, namespace)
 		}
 
 		// TODO: uniform naming rules with _
@@ -167,7 +173,7 @@ func (e *NebulaExporter) CollectMetrics(
 	}
 }
 
-func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName string, instance Instance, ch chan<- prometheus.Metric) {
+func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName string, instance Instance, ch chan<- prometheus.Metric, aggregator *metricAggregator) {
 	podIpAddress := instance.EndpointIP
 	podHttpPort := instance.EndpointPort
 
@@ -189,7 +195,7 @@ func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName stri
 				klog.Errorf("get query metrics from %s:%d failed: %v", podIpAddress, podHttpPort, err)
 				return
 			}
-			e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, rocksDBStatus, ch)
+			e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, rocksDBStatus, ch, aggregator)
 		}()
 	}
 
@@ -200,7 +206,7 @@ func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName stri
 			klog.Errorf("get query metrics from %s:%d failed: %v", podIpAddress, podHttpPort, err)
 			return
 		}
-		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, metrics, ch)
+		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, metrics, ch, aggregator)
 	}()
 
 	go func() {
@@ -209,7 +215,7 @@ func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName stri
 		if !isNebulaComponentRunning(podIpAddress, podHttpPort) {
 			statusMetrics = "count=0"
 		}
-		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, []string{statusMetrics}, ch)
+		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, []string{statusMetrics}, ch, aggregator)
 	}()
 }
 
@@ -225,7 +231,7 @@ func (e *NebulaExporter) CollectFromStaticConfig(ch chan<- prometheus.Metric) {
 			if instance.Name == "" {
 				instance.Name = fmt.Sprintf("%s-%s", instance.EndpointIP, instance.ComponentType)
 			}
-			e.collect(&wg, NonNamespace, cluster.Name, instance, ch)
+			e.collect(&wg, NonNamespace, cluster.Name, instance, ch, nil)
 		}
 	}
 
@@ -244,6 +250,9 @@ func (e *NebulaExporter) CollectFromKubernetes(ch chan<- prometheus.Metric) {
 		klog.Error(err)
 		return
 	}
+
+	// Create aggregator for service-level metrics
+	aggregator := newMetricAggregator()
 
 	var wg sync.WaitGroup
 	for _, item := range podLists.Items {
@@ -277,10 +286,13 @@ func (e *NebulaExporter) CollectFromKubernetes(ch chan<- prometheus.Metric) {
 					EndpointIP:    podIpAddress,
 					EndpointPort:  port.ContainerPort,
 					ComponentType: componentType,
-				}, ch)
+				}, ch, aggregator)
 			}
 		}
 	}
 
 	wg.Wait()
+
+	// Emit aggregated service-level metrics
+	aggregator.emitAggregatedMetrics(ch)
 }
