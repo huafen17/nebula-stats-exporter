@@ -11,6 +11,6 @@
 vendor/
 .idea/
 # nebula-stats-exporter exec binary file
-nebula-stats-exporter
+# nebula-stats-exporter
 config.yaml
 
